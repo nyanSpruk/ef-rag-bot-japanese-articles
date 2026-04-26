@@ -2,8 +2,20 @@ services:
 - type: web
   name: easy-japanese-news-explorer
   runtime: python
-  buildCommand: pip install -r requirements.txt
+  buildCommand: pip install -r requirements.txt && python scripts/prewarm_render.py
   startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
   envVars:
   - key: PYTHON_VERSION
     value: "3.11"
+  - key: HF_HOME
+    value: /opt/render/project/src/.cache/huggingface
+  - key: TRANSFORMERS_CACHE
+    value: /opt/render/project/src/.cache/huggingface
+  - key: SENTENCE_TRANSFORMERS_HOME
+    value: /opt/render/project/src/.cache/huggingface
+  - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  - key: TOKENIZERS_PARALLELISM
+    value: "false"
+  - key: OMP_NUM_THREADS
+    value: "1"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import re
 
@@ -27,8 +28,12 @@ CHUNKING_STRATEGIES = {
 
 BASE_DIR = Path(__file__).resolve().parent
 ARTICLES_DIR = BASE_DIR / "articles"
-CHROMA_DIR = BASE_DIR / "chroma_db"
-MODEL_CACHE_DIR = BASE_DIR / ".cache" / "huggingface"
+CHROMA_DIR = Path(os.getenv("CHROMA_DIR", str(BASE_DIR / "chroma_db")))
+MODEL_CACHE_DIR = Path(
+    os.getenv("HF_HOME", str(BASE_DIR / ".cache" / "huggingface"))
+)
+IS_RENDER = bool(os.getenv("RENDER")) or "render.com" in os.getenv("RENDER_EXTERNAL_URL", "")
+RENDER_SAFE_STRATEGIES = [DEFAULT_CHUNKING_STRATEGY]
 
 PRIMARY_ARTICLES = {
     "article-01": {
@@ -467,6 +472,7 @@ def build_chunk_fingerprint(split_docs: list[Document]) -> str:
 def create_vector_store(
     collection_name: str, embeddings: HuggingFaceEmbeddings
 ) -> Chroma:
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     return Chroma(
         collection_name=collection_name,
         persist_directory=str(CHROMA_DIR),
@@ -503,10 +509,9 @@ def get_embeddings() -> HuggingFaceEmbeddings:
     )
 
 
-@st.cache_resource(show_spinner=True)
 def get_vector_store(
     chunk_size: int, chunk_overlap: int
-) -> tuple[Chroma, list[dict[str, str | int]], list[Document]]:
+) -> Chroma:
     documents = get_documents()
     langchain_docs = to_langchain_documents(documents)
     split_docs = split_documents(langchain_docs, chunk_size, chunk_overlap)
@@ -527,7 +532,12 @@ def get_vector_store(
         )
         vector_store.add_documents(split_docs, ids=expected_chunk_ids)
 
-    return vector_store, documents, split_docs
+    return vector_store
+
+
+@st.cache_resource(show_spinner=True)
+def get_cached_vector_store(chunk_size: int, chunk_overlap: int) -> Chroma:
+    return get_vector_store(chunk_size, chunk_overlap)
 
 
 def search_documents(
@@ -552,12 +562,10 @@ def search_documents(
     return unique_results
 
 
-def preload_all_search_assets() -> None:
-    for strategy in CHUNKING_STRATEGIES.values():
-        get_vector_store(
-            chunk_size=int(strategy["chunk_size"]),
-            chunk_overlap=int(strategy["chunk_overlap"]),
-        )
+def get_available_strategy_keys() -> list[str]:
+    if IS_RENDER:
+        return RENDER_SAFE_STRATEGIES
+    return list(CHUNKING_STRATEGIES.keys())
 
 
 def render_sidebar() -> tuple[str, str]:
@@ -578,21 +586,28 @@ def render_sidebar() -> tuple[str, str]:
         label_visibility="collapsed",
     )
 
+    available_strategy_keys = get_available_strategy_keys()
+    default_strategy_index = available_strategy_keys.index(DEFAULT_CHUNKING_STRATEGY)
+
     strategy_label = st.sidebar.selectbox(
         "Chunking strategy",
-        options=list(CHUNKING_STRATEGIES.keys()),
-        index=list(CHUNKING_STRATEGIES.keys()).index(DEFAULT_CHUNKING_STRATEGY),
+        options=available_strategy_keys,
+        index=default_strategy_index,
         format_func=lambda key: (
             f"{key} · {CHUNKING_STRATEGIES[key]['label']} "
             f"({CHUNKING_STRATEGIES[key]['chunk_size']}/{CHUNKING_STRATEGIES[key]['chunk_overlap']})"
         ),
-        help="Use this to preview retrieval behavior across the three planned chunking settings.",
+        help="Use this to preview retrieval behavior across the planned chunking settings.",
     )
 
-    st.sidebar.caption(
-        "All three chunking strategies are preloaded and model files are cached locally "
-        "after the first successful startup."
-    )
+    if IS_RENDER:
+        st.sidebar.caption(
+            "Render mode uses the validated default strategy only to keep memory use low on a 512MB service."
+        )
+    else:
+        st.sidebar.caption(
+            "Model files and vector indexes are cached locally after the first successful run."
+        )
 
     return page, strategy_label
 
@@ -838,7 +853,6 @@ def render_chunking_comparison_page() -> None:
 def main() -> None:
     configure_page()
     inject_styles()
-    preload_all_search_assets()
 
     page, strategy_key = render_sidebar()
 
@@ -846,7 +860,7 @@ def main() -> None:
         render_home_page()
     elif page == "Search":
         strategy = CHUNKING_STRATEGIES[strategy_key]
-        vector_store, _, _ = get_vector_store(
+        vector_store = get_cached_vector_store(
             chunk_size=int(strategy["chunk_size"]),
             chunk_overlap=int(strategy["chunk_overlap"]),
         )
