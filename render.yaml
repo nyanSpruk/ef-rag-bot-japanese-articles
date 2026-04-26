@@ -3,7 +3,7 @@ services:
   name: easy-japanese-news-explorer
   runtime: python
   buildCommand: pip install -r requirements.txt && python scripts/prewarm_render.py
-  startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+  startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --server.fileWatcherType none
   envVars:
   - key: PYTHON_VERSION
     value: "3.11"
@@ -18,4 +18,10 @@ services:
   - key: TOKENIZERS_PARALLELISM
     value: "false"
   - key: OMP_NUM_THREADS
+    value: "1"
+  - key: OPENBLAS_NUM_THREADS
+    value: "1"
+  - key: MKL_NUM_THREADS
+    value: "1"
+  - key: NUMEXPR_NUM_THREADS
     value: "1"

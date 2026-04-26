@@ -17,6 +17,8 @@ APP_SUBTITLE = (
     "A semantic search tool for reading and reviewing easy Japanese news articles"
 )
 EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+EMBEDDING_BACKEND = "onnx"
+EMBEDDING_BACKEND_FILE = "onnx/model_quint8_avx2.onnx"
 DEFAULT_RESULT_COUNT = 3
 INTERNAL_RETRIEVAL_K = 9
 DEFAULT_CHUNKING_STRATEGY = "A"
@@ -506,6 +508,21 @@ def get_embeddings() -> HuggingFaceEmbeddings:
     return HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL_NAME,
         cache_folder=str(MODEL_CACHE_DIR),
+        model_kwargs={
+            "backend": EMBEDDING_BACKEND,
+            "model_kwargs": {
+                "file_name": EMBEDDING_BACKEND_FILE,
+                "provider": "CPUExecutionProvider",
+            },
+        },
+        encode_kwargs={
+            "batch_size": 4,
+            "normalize_embeddings": True,
+        },
+        query_encode_kwargs={
+            "batch_size": 1,
+            "normalize_embeddings": True,
+        },
     )
 
 

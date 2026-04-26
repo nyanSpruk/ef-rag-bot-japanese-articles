@@ -5,5 +5,5 @@ langchain-chroma
 langchain-huggingface
 langchain-text-splitters
 chromadb
-sentence-transformers
+sentence-transformers[onnx]
 watchdog
