@@ -16,7 +16,7 @@ APP_TITLE = "Easy Japanese News Explorer"
 APP_SUBTITLE = (
     "A semantic search tool for reading and reviewing easy Japanese news articles"
 )
-EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 EMBEDDING_BACKEND = "onnx"
 EMBEDDING_BACKEND_FILE = "onnx/model_quint8_avx2.onnx"
 DEFAULT_RESULT_COUNT = 3
@@ -36,6 +36,9 @@ MODEL_CACHE_DIR = Path(
 )
 IS_RENDER = bool(os.getenv("RENDER")) or "render.com" in os.getenv("RENDER_EXTERNAL_URL", "")
 RENDER_SAFE_STRATEGIES = [DEFAULT_CHUNKING_STRATEGY]
+EMBEDDING_SIGNATURE = (
+    f"{EMBEDDING_MODEL_NAME}|{EMBEDDING_BACKEND}|{EMBEDDING_BACKEND_FILE}"
+)
 
 PRIMARY_ARTICLES = {
     "article-01": {
@@ -433,8 +436,17 @@ def to_langchain_documents(documents: list[dict[str, str | int]]) -> list[Docume
     langchain_docs: list[Document] = []
     for doc in documents:
         metadata = {key: value for key, value in doc.items() if key != "text"}
+        metadata["display_text"] = str(doc["text"])
+        search_text = "\n".join(
+            [
+                str(doc["title"]),
+                str(doc["topic_tag"]).replace("-", " "),
+                str(doc["summary_note"]),
+                str(doc["text"]),
+            ]
+        )
         langchain_docs.append(
-            Document(page_content=str(doc["text"]), metadata=metadata)
+            Document(page_content=search_text, metadata=metadata)
         )
     return langchain_docs
 
@@ -458,6 +470,12 @@ def split_documents(
         doc.metadata["chunk_id"] = f"{article_id}-chunk-{chunk_index}"
 
     return split_docs
+
+
+def get_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
+    documents = get_documents()
+    langchain_docs = to_langchain_documents(documents)
+    return split_documents(langchain_docs, chunk_size, chunk_overlap)
 
 
 def build_chunk_fingerprint(split_docs: list[Document]) -> str:
@@ -498,8 +516,13 @@ def vector_store_matches_expected(
     if set(stored_ids) != set(expected_chunk_ids):
         return False
 
-    stored_fingerprint = vector_store._collection.metadata.get("chunk_fingerprint", "")
-    return stored_fingerprint == expected_fingerprint
+    metadata = vector_store._collection.metadata or {}
+    stored_fingerprint = metadata.get("chunk_fingerprint", "")
+    stored_signature = metadata.get("embedding_signature", "")
+    return (
+        stored_fingerprint == expected_fingerprint
+        and stored_signature == EMBEDDING_SIGNATURE
+    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -512,7 +535,6 @@ def get_embeddings() -> HuggingFaceEmbeddings:
             "backend": EMBEDDING_BACKEND,
             "model_kwargs": {
                 "file_name": EMBEDDING_BACKEND_FILE,
-                "provider": "CPUExecutionProvider",
             },
         },
         encode_kwargs={
@@ -529,23 +551,27 @@ def get_embeddings() -> HuggingFaceEmbeddings:
 def get_vector_store(
     chunk_size: int, chunk_overlap: int
 ) -> Chroma:
-    documents = get_documents()
-    langchain_docs = to_langchain_documents(documents)
-    split_docs = split_documents(langchain_docs, chunk_size, chunk_overlap)
+    split_docs = get_split_docs(chunk_size, chunk_overlap)
     embeddings = get_embeddings()
 
-    collection_name = f"easy_japanese_news_{chunk_size}_{chunk_overlap}"
     expected_chunk_ids = [str(doc.metadata["chunk_id"]) for doc in split_docs]
     expected_fingerprint = build_chunk_fingerprint(split_docs)
+    collection_suffix = hashlib.sha1(
+        f"{expected_fingerprint}|{EMBEDDING_SIGNATURE}".encode("utf-8")
+    ).hexdigest()[:10]
+    collection_name = (
+        f"easy_japanese_news_{chunk_size}_{chunk_overlap}_{collection_suffix}"
+    )
     vector_store = create_vector_store(collection_name, embeddings)
 
     if not vector_store_matches_expected(
         vector_store, expected_chunk_ids, expected_fingerprint
     ):
-        vector_store._client.delete_collection(collection_name)
-        vector_store = create_vector_store(collection_name, embeddings)
         vector_store._collection.modify(
-            metadata={"chunk_fingerprint": expected_fingerprint}
+            metadata={
+                "chunk_fingerprint": expected_fingerprint,
+                "embedding_signature": EMBEDDING_SIGNATURE,
+            }
         )
         vector_store.add_documents(split_docs, ids=expected_chunk_ids)
 
@@ -557,17 +583,90 @@ def get_cached_vector_store(chunk_size: int, chunk_overlap: int) -> Chroma:
     return get_vector_store(chunk_size, chunk_overlap)
 
 
+@st.cache_resource(show_spinner=False)
+def get_cached_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
+    return get_split_docs(chunk_size, chunk_overlap)
+
+
+def extract_query_terms(query: str) -> set[str]:
+    lowered = query.lower().strip()
+    terms = set(re.findall(r"[a-z0-9]+|[一-龯ぁ-んァ-ンー]+", lowered))
+    if re.search(r"[一-龯ぁ-んァ-ンー]", lowered):
+        compact = re.sub(r"\s+", "", lowered)
+        terms.update(
+            compact[index : index + 2]
+            for index in range(len(compact) - 1)
+            if compact[index : index + 2].strip()
+        )
+    return {term for term in terms if term}
+
+
+def lexical_search_documents(
+    split_docs: list[Document], query: str, limit: int
+) -> list[Document]:
+    query_terms = extract_query_terms(query)
+    if not query_terms:
+        return []
+
+    scored_docs: list[tuple[float, Document]] = []
+    for doc in split_docs:
+        title_text = str(doc.metadata.get("title", "")).lower()
+        topic_text = str(doc.metadata.get("topic_tag", "")).replace("-", " ").lower()
+        summary_text = str(doc.metadata.get("summary_note", "")).lower()
+        body_text = str(doc.metadata.get("display_text", "")).lower()
+
+        score = 0.0
+        for term in query_terms:
+            if term in title_text:
+                score += max(6.0, min(len(term) * 2.5, 14.0))
+            if term in summary_text:
+                score += max(2.5, min(len(term), 6.0))
+            if term in topic_text:
+                score += max(2.0, min(len(term), 5.0))
+            if term in body_text:
+                score += max(1.0, min(len(term), 6.0))
+
+        if score > 0:
+            scored_docs.append((score, doc))
+
+    scored_docs.sort(key=lambda item: item[0], reverse=True)
+    return [doc for _, doc in scored_docs[:limit]]
+
+
 def search_documents(
     vector_store: Chroma,
+    split_docs: list[Document],
     query: str,
     k: int = DEFAULT_RESULT_COUNT,
     internal_k: int = INTERNAL_RETRIEVAL_K,
 ) -> list[Document]:
     raw_results = vector_store.similarity_search(query, k=max(k, internal_k))
+    lexical_results = lexical_search_documents(split_docs, query, limit=max(k, internal_k))
+    fused_scores: dict[str, float] = {}
+    fused_docs: dict[str, Document] = {}
+
+    for rank, result in enumerate(raw_results, start=1):
+        chunk_id = str(result.metadata.get("chunk_id", ""))
+        fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + (1 / (rank + 10))
+        fused_docs[chunk_id] = result
+
+    for rank, result in enumerate(lexical_results, start=1):
+        chunk_id = str(result.metadata.get("chunk_id", ""))
+        fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + (1 / (rank + 10))
+        fused_docs[chunk_id] = result
+
+    reranked_results = [
+        fused_docs[chunk_id]
+        for chunk_id, _ in sorted(
+            fused_scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
     unique_results: list[Document] = []
     seen_article_ids: set[str] = set()
 
-    for result in raw_results:
+    for result in reranked_results:
         article_id = str(result.metadata.get("id", ""))
         if article_id in seen_article_ids:
             continue
@@ -712,7 +811,7 @@ def format_result_card(result: Document, rank: int) -> str:
             <span class="meta-pill">{publication_date}</span>
             <span class="meta-pill">{source_name}</span>
         </div>
-        <p class="result-text">{result.page_content}</p>
+        <p class="result-text">{metadata.get("display_text", result.page_content)}</p>
         <div class="result-footer muted">
             <a href="{source_url}" target="_blank">Open source article</a>
         </div>
@@ -720,7 +819,9 @@ def format_result_card(result: Document, rank: int) -> str:
     """
 
 
-def render_search_page(vector_store: Chroma, strategy_key: str) -> None:
+def render_search_page(
+    vector_store: Chroma, split_docs: list[Document], strategy_key: str
+) -> None:
     strategy = CHUNKING_STRATEGIES[strategy_key]
     st.markdown(
         """
@@ -752,7 +853,9 @@ def render_search_page(vector_store: Chroma, strategy_key: str) -> None:
         )
         return
 
-    results = search_documents(vector_store, query.strip(), k=DEFAULT_RESULT_COUNT)
+    results = search_documents(
+        vector_store, split_docs, query.strip(), k=DEFAULT_RESULT_COUNT
+    )
     if not results:
         st.warning("No results were found. Try a shorter or more topic-specific query.")
         return
@@ -881,7 +984,11 @@ def main() -> None:
             chunk_size=int(strategy["chunk_size"]),
             chunk_overlap=int(strategy["chunk_overlap"]),
         )
-        render_search_page(vector_store, strategy_key)
+        split_docs = get_cached_split_docs(
+            chunk_size=int(strategy["chunk_size"]),
+            chunk_overlap=int(strategy["chunk_overlap"]),
+        )
+        render_search_page(vector_store, split_docs, strategy_key)
     elif page == "About the Dataset":
         render_about_dataset_page(get_documents())
     else:
