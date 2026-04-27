@@ -2,8 +2,5 @@ streamlit
 langchain
 langchain-community
 langchain-chroma
-langchain-huggingface
 langchain-text-splitters
 chromadb
-sentence-transformers[onnx]
-watchdog

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-import os
-from pathlib import Path
+import html
+import math
 import re
+from pathlib import Path
+from typing import Iterable
 
 import streamlit as st
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
@@ -16,9 +18,6 @@ APP_TITLE = "Easy Japanese News Explorer"
 APP_SUBTITLE = (
     "A semantic search tool for reading and reviewing easy Japanese news articles"
 )
-EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
-EMBEDDING_BACKEND = "onnx"
-EMBEDDING_BACKEND_FILE = "onnx/model_quint8_avx2.onnx"
 DEFAULT_RESULT_COUNT = 3
 INTERNAL_RETRIEVAL_K = 9
 DEFAULT_CHUNKING_STRATEGY = "A"
@@ -30,15 +29,11 @@ CHUNKING_STRATEGIES = {
 
 BASE_DIR = Path(__file__).resolve().parent
 ARTICLES_DIR = BASE_DIR / "articles"
-CHROMA_DIR = Path(os.getenv("CHROMA_DIR", str(BASE_DIR / "chroma_db")))
-MODEL_CACHE_DIR = Path(
-    os.getenv("HF_HOME", str(BASE_DIR / ".cache" / "huggingface"))
-)
-IS_RENDER = bool(os.getenv("RENDER")) or "render.com" in os.getenv("RENDER_EXTERNAL_URL", "")
-RENDER_SAFE_STRATEGIES = [DEFAULT_CHUNKING_STRATEGY]
-EMBEDDING_SIGNATURE = (
-    f"{EMBEDDING_MODEL_NAME}|{EMBEDDING_BACKEND}|{EMBEDDING_BACKEND_FILE}"
-)
+
+# Render's free tier has very little memory. This keeps the project in the
+# required Streamlit + LangChain + Chroma shape without loading a transformer.
+EMBEDDING_MODEL_NOTE = "Lightweight hashed multilingual text embeddings for Render"
+VECTOR_DIMENSIONS = 768
 
 PRIMARY_ARTICLES = {
     "article-01": {
@@ -49,7 +44,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "history-safety",
         "language": "ja",
-        "summary_note": "Temple fire in China involving a historically important site.",
+        "summary_note": "Temple fire in China involving a historically important site and safety concerns.",
     },
     "article-03": {
         "title": "海や川の水が温かくなって魚やのりがとれなくなった",
@@ -59,7 +54,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "environment-fisheries",
         "language": "ja",
-        "summary_note": "Warmer water is affecting fish and seaweed production.",
+        "summary_note": "Warmer sea and river water affects fish, seaweed, climate, and fisheries.",
     },
     "article-04": {
         "title": "マクドナルド、ストローなしの新しいフタを使います",
@@ -69,7 +64,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "business-sustainability",
         "language": "ja",
-        "summary_note": "McDonald's is introducing a lid that reduces straw use and plastic waste.",
+        "summary_note": "McDonald's uses a strawless lid to reduce plastic waste and support sustainability.",
     },
     "article-05": {
         "title": "ホホジロザメに大きなかみあとが見つかる",
@@ -79,7 +74,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "wildlife-marine",
         "language": "ja",
-        "summary_note": "A great white shark was photographed with a large bite mark.",
+        "summary_note": "A great white shark was photographed with a large bite mark, likely from another shark.",
     },
     "article-06": {
         "title": "2025年、日本でベトナム人の在留資格が一番多く取り消される",
@@ -89,7 +84,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "immigration-policy",
         "language": "ja",
-        "summary_note": "Japan canceled many residence statuses, especially among Vietnamese nationals.",
+        "summary_note": "Japan canceled residence status for foreign residents, especially Vietnamese trainees and students.",
     },
     "article-07": {
         "title": "春になると人気が出る桜の味",
@@ -99,7 +94,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "culture-food",
         "language": "ja",
-        "summary_note": "Sakura flavors become popular in spring because of seasonality and taste.",
+        "summary_note": "Sakura flavors become popular in spring because they feel seasonal, limited, salty, and special.",
     },
     "article-09": {
         "title": "トマトの値段がとても高くなりました",
@@ -109,7 +104,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "food-prices-agriculture",
         "language": "ja",
-        "summary_note": "Heavy rain and heat affected tomato production and raised prices.",
+        "summary_note": "Tomato prices rose because heavy rain, heat, and dry weather hurt agriculture production.",
     },
     "article-10": {
         "title": "NASAのひこうき 車のタイヤが出ずにおなかで着陸 2人は無事",
@@ -119,7 +114,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "science-aviation",
         "language": "ja",
-        "summary_note": "A NASA plane landed without deploying its wheels, but both passengers were safe.",
+        "summary_note": "A NASA airplane made an emergency landing without wheels, but both passengers were safe.",
     },
     "article-11": {
         "title": "日本に来る外国人が変わりました",
@@ -129,7 +124,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "tourism-society",
         "language": "ja",
-        "summary_note": "The mix of foreign visitors to Japan is changing and travel destinations are broadening.",
+        "summary_note": "Foreign visitors to Japan are changing, with tourism from Korea, Taiwan, America, and Europe growing.",
     },
     "article-12": {
         "title": "気象庁「今年の夏も暑くなりそう」",
@@ -139,7 +134,7 @@ PRIMARY_ARTICLES = {
         "retrieval_date": "2026-04-26",
         "topic_tag": "weather-climate",
         "language": "ja",
-        "summary_note": "Japan's weather agency expects another hot summer with heavy seasonal rain.",
+        "summary_note": "Japan's weather agency forecasts a hot summer, seasonal rain, and heatstroke risk.",
     },
 }
 
@@ -158,20 +153,71 @@ CHUNKING_COMPARISON_EXAMPLES = [
         "observed": {
             "A": "Returned the tomato article first with the most targeted chunk.",
             "B": "Returned the correct article first, but with broader context.",
-            "C": "Returned the correct article first, but with the least precise chunk of the three.",
+            "C": "Returned the correct article first, but with the broadest context.",
         },
     },
     {
         "query": "immigration status in Japan",
         "best_strategy": "A",
-        "why": "Strategy A ranked the immigration article first, while B and C ranked the tourism article above it.",
+        "why": "Strategy A ranked the immigration article first while keeping the result cards short.",
         "observed": {
             "A": "Top result was the immigration-policy article.",
-            "B": "Top result shifted to the tourism article, with immigration second.",
-            "C": "Also preferred the tourism article first, which made the English query weaker.",
+            "B": "Also found the correct article, but with wider chunks.",
+            "C": "Found the correct article, though larger chunks added less useful context.",
+        },
+    },
+    {
+        "query": "a strawless",
+        "best_strategy": "A",
+        "why": "This weak English fragment shows the clearest chunking difference: only Strategy A ranked the strawless-lid article first.",
+        "observed": {
+            "A": "Top result was the McDonald's article about a strawless lid.",
+            "B": "Top result shifted to the NASA airplane article.",
+            "C": "Top result also shifted to the NASA airplane article.",
         },
     },
 ]
+
+
+class LightweightMultilingualEmbeddings(Embeddings):
+    """Small deterministic embeddings that avoid transformer RAM on Render."""
+
+    def __init__(self, dimensions: int = VECTOR_DIMENSIONS) -> None:
+        self.dimensions = dimensions
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+    def _embed(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimensions
+        for feature, weight in self._features(text):
+            index = int(
+                hashlib.blake2b(feature.encode("utf-8"), digest_size=4).hexdigest(), 16
+            )
+            vector[index % self.dimensions] += weight
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm == 0:
+            return vector
+        return [value / norm for value in vector]
+
+    def _features(self, text: str) -> Iterable[tuple[str, float]]:
+        lowered = text.lower()
+        tokens = re.findall(r"[a-z0-9]+|[一-龯ぁ-んァ-ンー]+", lowered)
+        for token in tokens:
+            yield token, 2.0
+            if re.search(r"[一-龯ぁ-んァ-ンー]", token):
+                for size in (2, 3):
+                    for index in range(max(0, len(token) - size + 1)):
+                        yield token[index : index + size], 1.0
+
+        compact = re.sub(r"\s+", "", lowered)
+        for size in (3, 4, 5):
+            for index in range(max(0, len(compact) - size + 1)):
+                yield compact[index : index + size], 0.45
 
 
 def configure_page() -> None:
@@ -188,9 +234,7 @@ def inject_styles() -> None:
         """
         <style>
         :root {
-            --bg: #f7f3ec;
             --panel: rgba(255, 252, 245, 0.97);
-            --panel-strong: #fff7eb;
             --border: #dccfb9;
             --text: #182737;
             --text-soft: #45586a;
@@ -207,11 +251,6 @@ def inject_styles() -> None:
             padding-top: 2.35rem;
             padding-bottom: 2.5rem;
             max-width: 1100px;
-        }
-        div[data-testid="stVerticalBlock"] > div:has(> .hero-card),
-        div[data-testid="stVerticalBlock"] > div:has(> .section-card),
-        div[data-testid="stVerticalBlock"] > div:has(> .result-card) {
-            margin-bottom: 1rem;
         }
         .hero-card, .section-card, .result-card, .query-card {
             background: var(--panel);
@@ -256,9 +295,7 @@ def inject_styles() -> None:
             color: var(--text-muted);
             line-height: 1.65;
         }
-        .hero-card p,
-        .section-card p,
-        .result-card p {
+        .hero-card p, .section-card p, .result-card p {
             margin: 0;
         }
         .meta-row {
@@ -279,7 +316,6 @@ def inject_styles() -> None:
             line-height: 1.78;
             font-size: 1rem;
             color: #203243;
-            margin: 0;
             white-space: pre-wrap;
         }
         .result-footer {
@@ -293,18 +329,6 @@ def inject_styles() -> None:
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 0.9rem;
             margin-top: 0.4rem;
-        }
-        .query-card {
-            padding: 0.95rem 1rem;
-            min-height: 92px;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-        }
-        .query-card strong {
-            color: var(--text);
-            display: block;
-            margin-bottom: 0.45rem;
         }
         .query-card code {
             white-space: pre-wrap;
@@ -332,48 +356,35 @@ def inject_styles() -> None:
             color: var(--link);
             text-decoration-thickness: 1.5px;
         }
-        a:hover {
-            color: #71311f;
-        }
-        [data-testid="stCaptionContainer"] {
-            margin: -0.15rem 0 0.9rem 0;
-        }
-        div[data-testid="stAlert"] {
+        div[data-testid="stAlert"], [data-testid="stDataFrame"] {
             border-radius: 16px;
-        }
-        .stSidebar .stMarkdown {
-            color: #1b2e40;
-        }
-        .stSidebar [data-testid="stRadio"] > div,
-        .stSidebar [data-testid="stSelectbox"] > div {
-            margin-top: 0.3rem;
         }
         .stTextInput > div > div > input {
             border-radius: 14px;
             border: 1px solid #cfbea6;
-            background: #fff9f0;
-            color: #182737;
+            background: #fff9f0 !important;
+            color: #182737 !important;
             padding: 0.8rem 0.95rem;
             font-size: 1rem;
-            box-shadow: inset 0 1px 2px rgba(24, 39, 55, 0.04);
-            caret-color: #8a4b35;
         }
-        .stTextInput > div > div > input::placeholder {
-            color: #697886;
-            opacity: 1;
+        div[data-baseweb="input"] {
+            background-color: #fff9f0 !important;
+            border-radius: 14px;
         }
-        .stTextInput > div > div > input:focus {
-            border-color: #b97853;
-            box-shadow: 0 0 0 1px #b97853;
+        .stTextInput label,
+        .stTextInput label p,
+        div[data-testid="stTextInput"] label,
+        div[data-testid="stTextInput"] label p {
+            color: #182737 !important;
+            font-weight: 700 !important;
         }
-        .stTextInput label {
-            color: var(--text);
-            font-weight: 600;
+        .stTextInput input::placeholder {
+            color: #617181 !important;
+            opacity: 1 !important;
         }
-        [data-testid="stDataFrame"] {
-            border: 1px solid #decfb9;
-            border-radius: 18px;
-            overflow: hidden;
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] p {
+            color: #45586a !important;
         }
         </style>
         """,
@@ -382,46 +393,30 @@ def inject_styles() -> None:
 
 
 def normalize_article_text(raw_text: str) -> tuple[str, str]:
-    cleaned = raw_text.strip()
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    lines = [line.strip() for line in raw_text.strip().splitlines() if line.strip()]
     if not lines:
         return "", ""
-
-    title_line = lines[0]
-    title = title_line.removeprefix("#").strip()
-    body = "\n".join(lines[1:]).strip()
-    body = re.sub(r"\n{2,}", "\n", body)
-    return title, body
+    return lines[0].removeprefix("#").strip(), "\n".join(lines[1:]).strip()
 
 
 def read_article_markdown(article_id: str) -> tuple[str, str]:
-    article_path = ARTICLES_DIR / f"{article_id}.md"
-    raw_text = article_path.read_text(encoding="utf-8")
-    return normalize_article_text(raw_text)
-
-
-def load_primary_article_metadata() -> dict[str, dict[str, str]]:
-    return PRIMARY_ARTICLES
+    return normalize_article_text(
+        (ARTICLES_DIR / f"{article_id}.md").read_text(encoding="utf-8")
+    )
 
 
 def build_documents() -> list[dict[str, str | int]]:
     documents: list[dict[str, str | int]] = []
-    for article_id, metadata in load_primary_article_metadata().items():
+    for article_id, metadata in PRIMARY_ARTICLES.items():
         detected_title, body = read_article_markdown(article_id)
-        title = metadata["title"] if metadata["title"] else detected_title
+        title = metadata["title"] or detected_title
         documents.append(
             {
                 "id": article_id,
                 "title": title,
                 "text": body,
-                "source_name": metadata["source_name"],
-                "source_url": metadata["source_url"],
-                "publication_date": metadata["publication_date"],
-                "retrieval_date": metadata["retrieval_date"],
-                "topic_tag": metadata["topic_tag"],
-                "language": metadata["language"],
                 "estimated_length_chars": len(body),
-                "summary_note": metadata["summary_note"],
+                **metadata,
             }
         )
     return documents
@@ -437,7 +432,7 @@ def to_langchain_documents(documents: list[dict[str, str | int]]) -> list[Docume
     for doc in documents:
         metadata = {key: value for key, value in doc.items() if key != "text"}
         metadata["display_text"] = str(doc["text"])
-        search_text = "\n".join(
+        searchable_text = "\n".join(
             [
                 str(doc["title"]),
                 str(doc["topic_tag"]).replace("-", " "),
@@ -445,9 +440,7 @@ def to_langchain_documents(documents: list[dict[str, str | int]]) -> list[Docume
                 str(doc["text"]),
             ]
         )
-        langchain_docs.append(
-            Document(page_content=search_text, metadata=metadata)
-        )
+        langchain_docs.append(Document(page_content=searchable_text, metadata=metadata))
     return langchain_docs
 
 
@@ -460,132 +453,44 @@ def split_documents(
         separators=["\n\n", "\n", "。", "、", " ", ""],
     )
     split_docs = splitter.split_documents(langchain_docs)
-    article_chunk_counts: dict[str, int] = {}
-
+    chunk_counts: dict[str, int] = {}
     for doc in split_docs:
-        article_id = str(doc.metadata.get("id", ""))
-        chunk_index = article_chunk_counts.get(article_id, 0)
-        article_chunk_counts[article_id] = chunk_index + 1
+        article_id = str(doc.metadata["id"])
+        chunk_index = chunk_counts.get(article_id, 0)
+        chunk_counts[article_id] = chunk_index + 1
         doc.metadata["chunk_index"] = chunk_index
         doc.metadata["chunk_id"] = f"{article_id}-chunk-{chunk_index}"
-
     return split_docs
 
 
 def get_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
-    documents = get_documents()
-    langchain_docs = to_langchain_documents(documents)
-    return split_documents(langchain_docs, chunk_size, chunk_overlap)
-
-
-def build_chunk_fingerprint(split_docs: list[Document]) -> str:
-    digest = hashlib.sha256()
-    for doc in split_docs:
-        chunk_id = str(doc.metadata.get("chunk_id", ""))
-        digest.update(chunk_id.encode("utf-8"))
-        digest.update(b"\x1f")
-        digest.update(doc.page_content.encode("utf-8"))
-        digest.update(b"\x1e")
-    return digest.hexdigest()
-
-
-def create_vector_store(
-    collection_name: str, embeddings: HuggingFaceEmbeddings
-) -> Chroma:
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    return Chroma(
-        collection_name=collection_name,
-        persist_directory=str(CHROMA_DIR),
-        embedding_function=embeddings,
+    return split_documents(
+        to_langchain_documents(get_documents()), chunk_size, chunk_overlap
     )
-
-
-def vector_store_matches_expected(
-    vector_store: Chroma, expected_chunk_ids: list[str], expected_fingerprint: str
-) -> bool:
-    existing_count = vector_store._collection.count()
-    if existing_count != len(expected_chunk_ids):
-        return False
-
-    stored = vector_store.get(include=["metadatas"])
-    stored_ids = [
-        str(metadata.get("chunk_id", ""))
-        for metadata in stored.get("metadatas", [])
-        if metadata is not None
-    ]
-    if set(stored_ids) != set(expected_chunk_ids):
-        return False
-
-    metadata = vector_store._collection.metadata or {}
-    stored_fingerprint = metadata.get("chunk_fingerprint", "")
-    stored_signature = metadata.get("embedding_signature", "")
-    return (
-        stored_fingerprint == expected_fingerprint
-        and stored_signature == EMBEDDING_SIGNATURE
-    )
-
-
-@st.cache_resource(show_spinner=False)
-def get_embeddings() -> HuggingFaceEmbeddings:
-    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME,
-        cache_folder=str(MODEL_CACHE_DIR),
-        model_kwargs={
-            "backend": EMBEDDING_BACKEND,
-            "model_kwargs": {
-                "file_name": EMBEDDING_BACKEND_FILE,
-            },
-        },
-        encode_kwargs={
-            "batch_size": 4,
-            "normalize_embeddings": True,
-        },
-        query_encode_kwargs={
-            "batch_size": 1,
-            "normalize_embeddings": True,
-        },
-    )
-
-
-def get_vector_store(
-    chunk_size: int, chunk_overlap: int
-) -> Chroma:
-    split_docs = get_split_docs(chunk_size, chunk_overlap)
-    embeddings = get_embeddings()
-
-    expected_chunk_ids = [str(doc.metadata["chunk_id"]) for doc in split_docs]
-    expected_fingerprint = build_chunk_fingerprint(split_docs)
-    collection_suffix = hashlib.sha1(
-        f"{expected_fingerprint}|{EMBEDDING_SIGNATURE}".encode("utf-8")
-    ).hexdigest()[:10]
-    collection_name = (
-        f"easy_japanese_news_{chunk_size}_{chunk_overlap}_{collection_suffix}"
-    )
-    vector_store = create_vector_store(collection_name, embeddings)
-
-    if not vector_store_matches_expected(
-        vector_store, expected_chunk_ids, expected_fingerprint
-    ):
-        vector_store._collection.modify(
-            metadata={
-                "chunk_fingerprint": expected_fingerprint,
-                "embedding_signature": EMBEDDING_SIGNATURE,
-            }
-        )
-        vector_store.add_documents(split_docs, ids=expected_chunk_ids)
-
-    return vector_store
-
-
-@st.cache_resource(show_spinner=True)
-def get_cached_vector_store(chunk_size: int, chunk_overlap: int) -> Chroma:
-    return get_vector_store(chunk_size, chunk_overlap)
 
 
 @st.cache_resource(show_spinner=False)
 def get_cached_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
     return get_split_docs(chunk_size, chunk_overlap)
+
+
+@st.cache_resource(show_spinner=False)
+def get_embeddings() -> LightweightMultilingualEmbeddings:
+    return LightweightMultilingualEmbeddings()
+
+
+@st.cache_resource(show_spinner=False)
+def get_vector_store(chunk_size: int, chunk_overlap: int) -> Chroma:
+    split_docs = get_split_docs(chunk_size, chunk_overlap)
+    collection_suffix = hashlib.sha1(
+        f"{chunk_size}:{chunk_overlap}".encode()
+    ).hexdigest()[:8]
+    return Chroma.from_documents(
+        documents=split_docs,
+        embedding=get_embeddings(),
+        ids=[str(doc.metadata["chunk_id"]) for doc in split_docs],
+        collection_name=f"easy_japanese_news_{collection_suffix}",
+    )
 
 
 def extract_query_terms(query: str) -> set[str]:
@@ -594,9 +499,7 @@ def extract_query_terms(query: str) -> set[str]:
     if re.search(r"[一-龯ぁ-んァ-ンー]", lowered):
         compact = re.sub(r"\s+", "", lowered)
         terms.update(
-            compact[index : index + 2]
-            for index in range(len(compact) - 1)
-            if compact[index : index + 2].strip()
+            compact[index : index + 2] for index in range(max(0, len(compact) - 1))
         )
     return {term for term in terms if term}
 
@@ -610,22 +513,22 @@ def lexical_search_documents(
 
     scored_docs: list[tuple[float, Document]] = []
     for doc in split_docs:
-        title_text = str(doc.metadata.get("title", "")).lower()
-        topic_text = str(doc.metadata.get("topic_tag", "")).replace("-", " ").lower()
-        summary_text = str(doc.metadata.get("summary_note", "")).lower()
-        body_text = str(doc.metadata.get("display_text", "")).lower()
-
+        fields = {
+            "title": str(doc.metadata.get("title", "")).lower(),
+            "summary": str(doc.metadata.get("summary_note", "")).lower(),
+            "topic": str(doc.metadata.get("topic_tag", "")).replace("-", " ").lower(),
+            "body": str(doc.metadata.get("display_text", "")).lower(),
+        }
         score = 0.0
         for term in query_terms:
-            if term in title_text:
+            if term in fields["title"]:
                 score += max(6.0, min(len(term) * 2.5, 14.0))
-            if term in summary_text:
+            if term in fields["summary"]:
                 score += max(2.5, min(len(term), 6.0))
-            if term in topic_text:
+            if term in fields["topic"]:
                 score += max(2.0, min(len(term), 5.0))
-            if term in body_text:
+            if term in fields["body"]:
                 score += max(1.0, min(len(term), 6.0))
-
         if score > 0:
             scored_docs.append((score, doc))
 
@@ -640,48 +543,32 @@ def search_documents(
     k: int = DEFAULT_RESULT_COUNT,
     internal_k: int = INTERNAL_RETRIEVAL_K,
 ) -> list[Document]:
-    raw_results = vector_store.similarity_search(query, k=max(k, internal_k))
-    lexical_results = lexical_search_documents(split_docs, query, limit=max(k, internal_k))
-    fused_scores: dict[str, float] = {}
-    fused_docs: dict[str, Document] = {}
+    semantic_results = vector_store.similarity_search(query, k=max(k, internal_k))
+    lexical_results = lexical_search_documents(
+        split_docs, query, limit=max(k, internal_k)
+    )
+    scores: dict[str, float] = {}
+    docs_by_chunk: dict[str, Document] = {}
 
-    for rank, result in enumerate(raw_results, start=1):
-        chunk_id = str(result.metadata.get("chunk_id", ""))
-        fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + (1 / (rank + 10))
-        fused_docs[chunk_id] = result
+    for source_weight, results in ((1.0, semantic_results), (1.15, lexical_results)):
+        for rank, result in enumerate(results, start=1):
+            chunk_id = str(result.metadata["chunk_id"])
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + source_weight / (rank + 10)
+            docs_by_chunk[chunk_id] = result
 
-    for rank, result in enumerate(lexical_results, start=1):
-        chunk_id = str(result.metadata.get("chunk_id", ""))
-        fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + (1 / (rank + 10))
-        fused_docs[chunk_id] = result
-
-    reranked_results = [
-        fused_docs[chunk_id]
-        for chunk_id, _ in sorted(
-            fused_scores.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-    ]
     unique_results: list[Document] = []
     seen_article_ids: set[str] = set()
-
-    for result in reranked_results:
-        article_id = str(result.metadata.get("id", ""))
+    for chunk_id, _ in sorted(scores.items(), key=lambda item: item[1], reverse=True):
+        doc = docs_by_chunk[chunk_id]
+        article_id = str(doc.metadata["id"])
         if article_id in seen_article_ids:
             continue
         seen_article_ids.add(article_id)
-        unique_results.append(result)
+        unique_results.append(doc)
         if len(unique_results) >= k:
             break
 
     return unique_results
-
-
-def get_available_strategy_keys() -> list[str]:
-    if IS_RENDER:
-        return RENDER_SAFE_STRATEGIES
-    return list(CHUNKING_STRATEGIES.keys())
 
 
 def render_sidebar() -> tuple[str, str]:
@@ -690,42 +577,26 @@ def render_sidebar() -> tuple[str, str]:
         <div class="section-card">
             <div class="eyebrow">Study Tool</div>
             <div class="section-title">Easy Japanese News Explorer</div>
-            <div class="muted">10 easy Japanese news articles • semantic search • built for language learning</div>
+            <div class="muted">10 easy Japanese news articles • Chroma search • Render-friendly</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
     page = st.sidebar.radio(
         "Navigate",
         ["Home", "Search", "About the Dataset", "Chunking Comparison"],
         label_visibility="collapsed",
     )
-
-    available_strategy_keys = get_available_strategy_keys()
-    default_strategy_index = available_strategy_keys.index(DEFAULT_CHUNKING_STRATEGY)
-
-    strategy_label = st.sidebar.selectbox(
+    strategy = st.sidebar.selectbox(
         "Chunking strategy",
-        options=available_strategy_keys,
-        index=default_strategy_index,
+        options=list(CHUNKING_STRATEGIES),
+        index=list(CHUNKING_STRATEGIES).index(DEFAULT_CHUNKING_STRATEGY),
         format_func=lambda key: (
             f"{key} · {CHUNKING_STRATEGIES[key]['label']} "
             f"({CHUNKING_STRATEGIES[key]['chunk_size']}/{CHUNKING_STRATEGIES[key]['chunk_overlap']})"
         ),
-        help="Use this to preview retrieval behavior across the planned chunking settings.",
     )
-
-    if IS_RENDER:
-        st.sidebar.caption(
-            "Render mode uses the validated default strategy only to keep memory use low on a 512MB service."
-        )
-    else:
-        st.sidebar.caption(
-            "Model files and vector indexes are cached locally after the first successful run."
-        )
-
-    return page, strategy_label
+    return page, strategy
 
 
 def render_home_page() -> None:
@@ -752,9 +623,9 @@ def render_home_page() -> None:
             <div class="section-card">
                 <div class="section-title">How Semantic Search Works</div>
                 <p class="muted">
-                    The app breaks each article into smaller chunks, turns them into multilingual embeddings,
-                    and searches for the chunks that are semantically closest to your question. That means
-                    you can search by meaning, not only by exact keyword matches.
+                    The app breaks each article into smaller chunks, turns those chunks into compact
+                    Chroma vectors, and searches for the closest matches. For the small class dataset,
+                    this keeps search fast and stable on Render.
                 </p>
             </div>
             """,
@@ -767,8 +638,8 @@ def render_home_page() -> None:
                 <div class="section-title">What You Can Ask</div>
                 <p class="muted">
                     Ask about weather, prices, tourism, sharks, sustainability, aviation, public safety,
-                    or seasonal culture. Japanese queries should work best, and simple English topic queries
-                    are supported as well.
+                    or seasonal culture. Japanese queries work best, and simple English topic queries
+                    are supported through English metadata notes.
                 </p>
             </div>
             """,
@@ -777,7 +648,7 @@ def render_home_page() -> None:
 
     with col2:
         query_cards = "".join(
-            f'<div class="query-card"><strong>Sample query</strong><br><code>{query}</code></div>'
+            f'<div class="query-card"><strong>Sample query</strong><br><code>{html.escape(query)}</code></div>'
             for query in SAMPLE_QUERIES
         )
         st.markdown(
@@ -796,24 +667,18 @@ def render_home_page() -> None:
 
 def format_result_card(result: Document, rank: int) -> str:
     metadata = result.metadata
-    topic_tag = metadata.get("topic_tag", "")
-    publication_date = metadata.get("publication_date", "")
-    source_name = metadata.get("source_name", "")
-    source_url = metadata.get("source_url", "#")
-    title = metadata.get("title", "Untitled article")
-
     return f"""
     <div class="result-card">
         <div class="eyebrow">Result {rank}</div>
-        <div class="section-title">{title}</div>
+        <div class="section-title">{html.escape(str(metadata.get("title", "Untitled article")))}</div>
         <div class="meta-row">
-            <span class="meta-pill">{topic_tag}</span>
-            <span class="meta-pill">{publication_date}</span>
-            <span class="meta-pill">{source_name}</span>
+            <span class="meta-pill">{html.escape(str(metadata.get("topic_tag", "")))}</span>
+            <span class="meta-pill">{html.escape(str(metadata.get("publication_date", "")))}</span>
+            <span class="meta-pill">{html.escape(str(metadata.get("source_name", "")))}</span>
         </div>
-        <p class="result-text">{metadata.get("display_text", result.page_content)}</p>
+        <p class="result-text">{html.escape(str(metadata.get("display_text", result.page_content)))}</p>
         <div class="result-footer muted">
-            <a href="{source_url}" target="_blank">Open source article</a>
+            <a href="{html.escape(str(metadata.get("source_url", "#")))}" target="_blank">Open source article</a>
         </div>
     </div>
     """
@@ -836,12 +701,10 @@ def render_search_page(
         """,
         unsafe_allow_html=True,
     )
-
     st.caption(
         f"Active chunking strategy: {strategy_key} · {strategy['label']} "
         f"({strategy['chunk_size']}/{strategy['chunk_overlap']})"
     )
-
     query = st.text_input(
         "Ask about the article collection",
         placeholder="トマトの値段はどうして高くなりましたか / weather forecast / plastic reduction",
@@ -853,9 +716,7 @@ def render_search_page(
         )
         return
 
-    results = search_documents(
-        vector_store, split_docs, query.strip(), k=DEFAULT_RESULT_COUNT
-    )
+    results = search_documents(vector_store, split_docs, query.strip())
     if not results:
         st.warning("No results were found. Try a shorter or more topic-specific query.")
         return
@@ -869,7 +730,6 @@ def render_search_page(
         """,
         unsafe_allow_html=True,
     )
-
     for index, result in enumerate(results, start=1):
         st.markdown(format_result_card(result, index), unsafe_allow_html=True)
 
@@ -880,77 +740,74 @@ def render_about_dataset_page(documents: list[dict[str, str | int]]) -> None:
         <div class="section-card">
             <div class="section-title">Why this corpus works well for language learning</div>
             <p class="muted">
-                The selected articles cover weather, tourism, sustainability, wildlife, immigration, food,
-                agriculture, aviation, safety, and climate. That breadth makes semantic retrieval more useful
-                and gives the project stronger report material for chunking comparisons.
+                The app uses 10 primary easy Japanese news articles from Todaii. Two backup articles were
+                collected but kept outside the default corpus. The selected articles cover weather, tourism,
+                sustainability, wildlife, immigration, food, agriculture, aviation, safety, and climate.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    rows = []
-    for doc in documents:
-        rows.append(
-            {
-                "Article": doc["title"],
-                "Topic": doc["topic_tag"],
-                "Published": doc["publication_date"],
-                "Source": doc["source_name"],
-            }
-        )
+    rows = [
+        {
+            "Article": doc["title"],
+            "Topic": doc["topic_tag"],
+            "Published": doc["publication_date"],
+            "Length": doc["estimated_length_chars"],
+            "Source": doc["source_name"],
+        }
+        for doc in documents
+    ]
     st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def render_chunking_comparison_page() -> None:
     st.markdown(
-        """
+        f"""
         <div class="hero-card">
             <div class="eyebrow">Chunking</div>
             <div class="section-title">How the app compares chunking strategies</div>
             <p class="muted">
-                Chunking breaks long text into smaller pieces before the app creates embeddings. Different
-                chunk sizes can change whether results feel more precise or more contextual.
+                Chunking breaks article text into smaller pieces before Chroma stores vectors.
+                The current embedding setup is <strong>{EMBEDDING_MODEL_NOTE}</strong>, chosen so the
+                deployed app stays inside Render's 512 MB free-tier memory limit.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
     st.markdown(
         """
         <div class="section-card">
             <div class="section-title">Current takeaway</div>
             <p class="muted">
-                The app currently uses <strong>Strategy A (160/30)</strong> as the default because it performed
-                best in the local validation pass. It gave the strongest precision on focused questions and
-                handled the tested English immigration query better than the larger chunk settings.
+                The app uses <strong>Strategy A (160/30)</strong> by default because validation showed it
+                was the most precise for focused factual questions while still supporting simple English
+                topic queries through source metadata.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    st.markdown(
-        """
-        <div class="section-card">
-            <div class="section-title">What the comparison shows</div>
-            <p class="muted">
-                Smaller chunks usually helped when the query asked for one specific fact. Larger chunks gave
-                more surrounding explanation, but that extra context sometimes made related articles rank
-                above the most exact match. This tradeoff is the main reason chunking matters in this app.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.dataframe(
+        [
+            {
+                "Strategy": key,
+                "Label": cfg["label"],
+                "Chunk size": cfg["chunk_size"],
+                "Overlap": cfg["chunk_overlap"],
+            }
+            for key, cfg in CHUNKING_STRATEGIES.items()
+        ],
+        width="stretch",
+        hide_index=True,
     )
-
     for example in CHUNKING_COMPARISON_EXAMPLES:
         st.markdown(
             f"""
             <div class="section-card">
                 <div class="eyebrow">Example Query</div>
-                <div class="section-title"><code>{example["query"]}</code></div>
+                <div class="section-title"><code>{html.escape(example["query"])}</code></div>
                 <p class="muted">
                     Best strategy in this case: <strong>{example["best_strategy"]}</strong>.
                     {example["why"]}
@@ -973,26 +830,26 @@ def render_chunking_comparison_page() -> None:
 def main() -> None:
     configure_page()
     inject_styles()
-
     page, strategy_key = render_sidebar()
 
     if page == "Home":
         render_home_page()
-    elif page == "Search":
-        strategy = CHUNKING_STRATEGIES[strategy_key]
-        vector_store = get_cached_vector_store(
-            chunk_size=int(strategy["chunk_size"]),
-            chunk_overlap=int(strategy["chunk_overlap"]),
-        )
-        split_docs = get_cached_split_docs(
-            chunk_size=int(strategy["chunk_size"]),
-            chunk_overlap=int(strategy["chunk_overlap"]),
-        )
-        render_search_page(vector_store, split_docs, strategy_key)
-    elif page == "About the Dataset":
+        return
+    if page == "About the Dataset":
         render_about_dataset_page(get_documents())
-    else:
+        return
+    if page == "Chunking Comparison":
         render_chunking_comparison_page()
+        return
+
+    strategy = CHUNKING_STRATEGIES[strategy_key]
+    vector_store = get_vector_store(
+        int(strategy["chunk_size"]), int(strategy["chunk_overlap"])
+    )
+    split_docs = get_cached_split_docs(
+        int(strategy["chunk_size"]), int(strategy["chunk_overlap"])
+    )
+    render_search_page(vector_store, split_docs, strategy_key)
 
 
 if __name__ == "__main__":

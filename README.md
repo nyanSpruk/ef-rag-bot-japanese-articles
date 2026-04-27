@@ -18,7 +18,7 @@ It uses:
 - Streamlit
 - LangChain
 - ChromaDB
-- sentence-transformers
+- a lightweight Chroma-compatible embedding class designed for Render's free 512 MB tier
 
 ## Dataset
 
@@ -28,8 +28,8 @@ The article texts live in [`articles/`](./articles), and metadata is tracked in 
 
 ## Retrieval Setup
 
-- Embedding model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-- Vector store: local persistent `chroma_db/`
+- Embedding setup: lightweight deterministic multilingual text embeddings
+- Vector store: in-memory Chroma index
 - Default visible results: top 3 unique articles
 - Current default chunking strategy: `A` (`160/30`)
 - Chunking strategies:
@@ -37,7 +37,7 @@ The article texts live in [`articles/`](./articles), and metadata is tracked in 
   - `B`: `280/50`
   - `C`: `420/70`
 
-The app preloads all 3 chunking strategies on startup and caches Hugging Face model files locally in `.cache/`.
+The app builds only the selected tiny Chroma index when the Search page is used, which keeps memory usage low for Render.
 
 ## Run Locally
 
@@ -59,6 +59,5 @@ This repo includes a [`render.yaml`](./render.yaml) file for Render deployment.
 
 ## Notes
 
-- The first startup can take longer because the app preloads search assets.
-- The first search-related model setup may still be heavy on a fresh machine or fresh deployment.
+- The first search builds a small in-memory index, but it should be much lighter than loading a transformer model.
 - Generated local artifacts such as `.cache/` and `chroma_db/` are ignored by git.
