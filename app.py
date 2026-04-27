@@ -1,3 +1,13 @@
+"""Streamlit app for a small RAG-style Japanese news search project.
+
+1. settings and article metadata
+2. lightweight embeddings
+3. page styling
+4. document loading and chunking
+5. search logic
+6. Streamlit page rendering
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +23,10 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+
+# ---------------------------------------------------------------------------
+# App settings
+# ---------------------------------------------------------------------------
 
 APP_TITLE = "Easy Japanese News Explorer"
 APP_SUBTITLE = (
@@ -34,6 +48,16 @@ ARTICLES_DIR = BASE_DIR / "articles"
 # required Streamlit + LangChain + Chroma shape without loading a transformer.
 EMBEDDING_MODEL_NOTE = "Lightweight hashed multilingual text embeddings for Render"
 VECTOR_DIMENSIONS = 768
+
+# These patterns are reused in the embedding and keyword search code.
+TOKEN_PATTERN = r"[a-z0-9]+|[一-龯ぁ-んァ-ンー]+"
+JAPANESE_PATTERN = r"[一-龯ぁ-んァ-ンー]"
+CHUNK_SEPARATORS = ["\n\n", "\n", "。", "、", " ", ""]
+
+
+# ---------------------------------------------------------------------------
+# Article metadata
+# ---------------------------------------------------------------------------
 
 PRIMARY_ARTICLES = {
     "article-01": {
@@ -157,16 +181,6 @@ CHUNKING_COMPARISON_EXAMPLES = [
         },
     },
     {
-        "query": "immigration status in Japan",
-        "best_strategy": "A",
-        "why": "Strategy A ranked the immigration article first while keeping the result cards short.",
-        "observed": {
-            "A": "Top result was the immigration-policy article.",
-            "B": "Also found the correct article, but with wider chunks.",
-            "C": "Found the correct article, though larger chunks added less useful context.",
-        },
-    },
-    {
         "query": "a strawless",
         "best_strategy": "A",
         "why": "This weak English fragment shows the clearest chunking difference: only Strategy A ranked the strawless-lid article first.",
@@ -179,8 +193,18 @@ CHUNKING_COMPARISON_EXAMPLES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Lightweight embedding model
+# ---------------------------------------------------------------------------
+
+
 class LightweightMultilingualEmbeddings(Embeddings):
-    """Small deterministic embeddings that avoid transformer RAM on Render."""
+    """Small deterministic embeddings.
+
+    A normal embedding model would download and run a transformer.
+    This class creates fixed-size vectors by hashing words and Japanese
+    character n-grams. Chroma can still compare the vectors for similarity.
+    """
 
     def __init__(self, dimensions: int = VECTOR_DIMENSIONS) -> None:
         self.dimensions = dimensions
@@ -206,10 +230,10 @@ class LightweightMultilingualEmbeddings(Embeddings):
 
     def _features(self, text: str) -> Iterable[tuple[str, float]]:
         lowered = text.lower()
-        tokens = re.findall(r"[a-z0-9]+|[一-龯ぁ-んァ-ンー]+", lowered)
+        tokens = re.findall(TOKEN_PATTERN, lowered)
         for token in tokens:
             yield token, 2.0
-            if re.search(r"[一-龯ぁ-んァ-ンー]", token):
+            if re.search(JAPANESE_PATTERN, token):
                 for size in (2, 3):
                     for index in range(max(0, len(token) - size + 1)):
                         yield token[index : index + size], 1.0
@@ -220,7 +244,14 @@ class LightweightMultilingualEmbeddings(Embeddings):
                 yield compact[index : index + size], 0.45
 
 
+# ---------------------------------------------------------------------------
+# Streamlit page setup and styling
+# ---------------------------------------------------------------------------
+
+
 def configure_page() -> None:
+    """Set Streamlit's browser title, icon, and layout."""
+
     st.set_page_config(
         page_title=APP_TITLE,
         page_icon="📰",
@@ -230,6 +261,8 @@ def configure_page() -> None:
 
 
 def inject_styles() -> None:
+    """Add the small amount of custom CSS used by all pages."""
+
     st.markdown(
         """
         <style>
@@ -392,7 +425,14 @@ def inject_styles() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Document loading and chunking
+# ---------------------------------------------------------------------------
+
+
 def normalize_article_text(raw_text: str) -> tuple[str, str]:
+    """Return the Markdown title and body from one article file."""
+
     lines = [line.strip() for line in raw_text.strip().splitlines() if line.strip()]
     if not lines:
         return "", ""
@@ -400,12 +440,16 @@ def normalize_article_text(raw_text: str) -> tuple[str, str]:
 
 
 def read_article_markdown(article_id: str) -> tuple[str, str]:
+    """Load one article file from the articles folder."""
+
     return normalize_article_text(
         (ARTICLES_DIR / f"{article_id}.md").read_text(encoding="utf-8")
     )
 
 
 def build_documents() -> list[dict[str, str | int]]:
+    """Combine article text files with their metadata."""
+
     documents: list[dict[str, str | int]] = []
     for article_id, metadata in PRIMARY_ARTICLES.items():
         detected_title, body = read_article_markdown(article_id)
@@ -424,10 +468,19 @@ def build_documents() -> list[dict[str, str | int]]:
 
 @st.cache_data(show_spinner=False)
 def get_documents() -> list[dict[str, str | int]]:
+    """Return the article list, cached so Streamlit does not reread files."""
+
     return build_documents()
 
 
 def to_langchain_documents(documents: list[dict[str, str | int]]) -> list[Document]:
+    """Convert plain dictionaries into LangChain Document objects.
+
+    The page content includes title and English metadata notes as well as the
+    Japanese article text. That makes Japanese search work and gives simple
+    English topic searches a little useful vocabulary.
+    """
+
     langchain_docs: list[Document] = []
     for doc in documents:
         metadata = {key: value for key, value in doc.items() if key != "text"}
@@ -447,10 +500,12 @@ def to_langchain_documents(documents: list[dict[str, str | int]]) -> list[Docume
 def split_documents(
     langchain_docs: list[Document], chunk_size: int, chunk_overlap: int
 ) -> list[Document]:
+    """Split articles into chunks and add stable chunk IDs."""
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", "、", " ", ""],
+        separators=CHUNK_SEPARATORS,
     )
     split_docs = splitter.split_documents(langchain_docs)
     chunk_counts: dict[str, int] = {}
@@ -464,6 +519,8 @@ def split_documents(
 
 
 def get_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
+    """Build chunks for a specific chunking strategy."""
+
     return split_documents(
         to_langchain_documents(get_documents()), chunk_size, chunk_overlap
     )
@@ -471,16 +528,22 @@ def get_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
 
 @st.cache_resource(show_spinner=False)
 def get_cached_split_docs(chunk_size: int, chunk_overlap: int) -> list[Document]:
+    """Cache split documents by strategy."""
+
     return get_split_docs(chunk_size, chunk_overlap)
 
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings() -> LightweightMultilingualEmbeddings:
+    """Create the embedding object once per Streamlit process."""
+
     return LightweightMultilingualEmbeddings()
 
 
 @st.cache_resource(show_spinner=False)
 def get_vector_store(chunk_size: int, chunk_overlap: int) -> Chroma:
+    """Create a tiny in-memory Chroma collection for one chunking strategy."""
+
     split_docs = get_split_docs(chunk_size, chunk_overlap)
     collection_suffix = hashlib.sha1(
         f"{chunk_size}:{chunk_overlap}".encode()
@@ -493,10 +556,17 @@ def get_vector_store(chunk_size: int, chunk_overlap: int) -> Chroma:
     )
 
 
+# ---------------------------------------------------------------------------
+# Search logic
+# ---------------------------------------------------------------------------
+
+
 def extract_query_terms(query: str) -> set[str]:
+    """Extract simple English/Japanese terms for the keyword backup search."""
+
     lowered = query.lower().strip()
-    terms = set(re.findall(r"[a-z0-9]+|[一-龯ぁ-んァ-ンー]+", lowered))
-    if re.search(r"[一-龯ぁ-んァ-ンー]", lowered):
+    terms = set(re.findall(TOKEN_PATTERN, lowered))
+    if re.search(JAPANESE_PATTERN, lowered):
         compact = re.sub(r"\s+", "", lowered)
         terms.update(
             compact[index : index + 2] for index in range(max(0, len(compact) - 1))
@@ -507,6 +577,8 @@ def extract_query_terms(query: str) -> set[str]:
 def lexical_search_documents(
     split_docs: list[Document], query: str, limit: int
 ) -> list[Document]:
+    """Return keyword matches used to support the vector search results."""
+
     query_terms = extract_query_terms(query)
     if not query_terms:
         return []
@@ -543,6 +615,13 @@ def search_documents(
     k: int = DEFAULT_RESULT_COUNT,
     internal_k: int = INTERNAL_RETRIEVAL_K,
 ) -> list[Document]:
+    """Search the corpus and return unique articles.
+
+    Chroma gives semantic matches. The lexical search is a small helper for
+    exact article titles, Japanese words, and simple English metadata terms.
+    The final loop removes duplicate visible articles from the result list.
+    """
+
     semantic_results = vector_store.similarity_search(query, k=max(k, internal_k))
     lexical_results = lexical_search_documents(
         split_docs, query, limit=max(k, internal_k)
@@ -571,7 +650,14 @@ def search_documents(
     return unique_results
 
 
+# ---------------------------------------------------------------------------
+# Streamlit page rendering
+# ---------------------------------------------------------------------------
+
+
 def render_sidebar() -> tuple[str, str]:
+    """Render navigation and return the selected page and chunking strategy."""
+
     st.sidebar.markdown(
         """
         <div class="section-card">
@@ -600,6 +686,8 @@ def render_sidebar() -> tuple[str, str]:
 
 
 def render_home_page() -> None:
+    """Render the landing page."""
+
     st.markdown(
         f"""
         <div class="hero-card">
@@ -666,6 +754,8 @@ def render_home_page() -> None:
 
 
 def format_result_card(result: Document, rank: int) -> str:
+    """Create the HTML for one search result card."""
+
     metadata = result.metadata
     return f"""
     <div class="result-card">
@@ -687,6 +777,8 @@ def format_result_card(result: Document, rank: int) -> str:
 def render_search_page(
     vector_store: Chroma, split_docs: list[Document], strategy_key: str
 ) -> None:
+    """Render the search page and display the current query results."""
+
     strategy = CHUNKING_STRATEGIES[strategy_key]
     st.markdown(
         """
@@ -735,6 +827,8 @@ def render_search_page(
 
 
 def render_about_dataset_page(documents: list[dict[str, str | int]]) -> None:
+    """Render a small dataset overview table."""
+
     st.markdown(
         """
         <div class="section-card">
@@ -762,6 +856,8 @@ def render_about_dataset_page(documents: list[dict[str, str | int]]) -> None:
 
 
 def render_chunking_comparison_page() -> None:
+    """Render the page that documents the chunking experiments."""
+
     st.markdown(
         f"""
         <div class="hero-card">
@@ -827,7 +923,14 @@ def render_chunking_comparison_page() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# App entry point
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
+    """Run the selected Streamlit page."""
+
     configure_page()
     inject_styles()
     page, strategy_key = render_sidebar()
